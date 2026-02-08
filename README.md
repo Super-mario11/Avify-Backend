@@ -60,6 +60,16 @@ curl -X POST "http://localhost:3000/convert/upload?format=avif" \
   -F "file=@./image.jpg"
 ```
 
+### POST `/upload`
+Uploads the original image to Cloudinary and returns transformed URLs (fastest path).
+- `multipart/form-data` with a single field named `file`
+
+Example:
+```bash
+curl -X POST "http://localhost:3000/upload" \
+  -F "file=@./image.jpg"
+```
+
 ## Deployment (Render)
 Use the repo-level `render.yaml` or configure manually:
 - Root directory: `backend/`

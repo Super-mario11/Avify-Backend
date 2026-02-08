@@ -119,7 +119,7 @@ app.post('/convert', async (request, reply) => {
     .send(converted.stream);
 });
 
-// Convert + upload to Cloudinary
+// Convert + upload to Cloudinary (server-side conversion)
 app.post('/convert/upload', async (request, reply) => {
   if (!CLOUDINARY_ENABLED) {
     reply.code(500);
@@ -182,6 +182,45 @@ app.post('/convert/upload', async (request, reply) => {
       format: result.format,
       publicId: result.public_id,
       originalFilename: file.filename || null
+    });
+  } catch (error) {
+    app.log.error(error);
+    reply.code(500);
+    return { error: 'Cloudinary upload failed' };
+  }
+});
+
+// Upload original to Cloudinary and return transformed URLs
+app.post('/upload', async (request, reply) => {
+  if (!CLOUDINARY_ENABLED) {
+    reply.code(500);
+    return { error: 'Cloudinary is not configured on this server.' };
+  }
+
+  const file = await request.file();
+
+  if (!file) {
+    reply.code(400);
+    return { error: 'No file uploaded' };
+  }
+
+  const publicId = buildPublicId(file.filename);
+
+  try {
+    const result = await uploadToCloudinary(file.file, {
+      folder: CLOUDINARY_FOLDER,
+      public_id: publicId,
+      resource_type: 'image',
+      overwrite: false
+    });
+
+    const urls = buildTransformedUrls(result.secure_url);
+
+    return reply.send({
+      originalUrl: result.secure_url,
+      bytes: result.bytes,
+      publicId: result.public_id,
+      urls
     });
   } catch (error) {
     app.log.error(error);
@@ -278,6 +317,19 @@ function buildPublicId(filename) {
     .replace(/(^-|-$)/g, '');
   const suffix = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
   return `${normalized || 'image'}-${suffix}`;
+}
+
+function buildTransformedUrls(secureUrl) {
+  const base = (format, quality = 'q_auto') =>
+    secureUrl.replace('/upload/', `/upload/f_${format},${quality}/`);
+
+  return {
+    avif: base('avif'),
+    webp: base('webp'),
+    jpeg: base('jpg'),
+    jpg: base('jpg'),
+    png: base('png')
+  };
 }
 
 async function uploadToCloudinary(readable, options) {

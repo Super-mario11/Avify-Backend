@@ -6,10 +6,26 @@ import sharp from 'sharp';
 import { PassThrough } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { once } from 'node:events';
+import { v2 as cloudinary } from 'cloudinary';
 
 const PORT = Number(process.env.PORT || 3000);
 const HOST = process.env.HOST || '0.0.0.0';
 const MAX_FILE_SIZE = Number(process.env.MAX_FILE_SIZE || 1024 * 1024 * 1024);
+const CLOUDINARY_CLOUD_NAME = process.env.CLOUDINARY_CLOUD_NAME || '';
+const CLOUDINARY_API_KEY = process.env.CLOUDINARY_API_KEY || '';
+const CLOUDINARY_API_SECRET = process.env.CLOUDINARY_API_SECRET || '';
+const CLOUDINARY_FOLDER = process.env.CLOUDINARY_FOLDER || 'converted';
+const CLOUDINARY_ENABLED =
+  CLOUDINARY_CLOUD_NAME && CLOUDINARY_API_KEY && CLOUDINARY_API_SECRET;
+
+if (CLOUDINARY_ENABLED) {
+  cloudinary.config({
+    cloud_name: CLOUDINARY_CLOUD_NAME,
+    api_key: CLOUDINARY_API_KEY,
+    api_secret: CLOUDINARY_API_SECRET,
+    secure: true
+  });
+}
 
 const app = Fastify({
   logger: true,
@@ -71,60 +87,100 @@ app.post('/convert', async (request, reply) => {
     return { error: 'No file uploaded' };
   }
 
-  const sourceStream = file.file;
-
-  // Stop stream temporarily while validating
-  sourceStream.pause();
-
-  const head = await readHead(sourceStream, 4100);
-  const magic = detectMagic(head);
-
-  if (!magic.valid) {
-    sourceStream.destroy();
-    reply.code(415);
-    return { error: 'Unsupported or invalid image signature' };
+  let converted;
+  try {
+    converted = await createConvertedStream({
+      fileStream: file.file,
+      format,
+      keepMetadata
+    });
+  } catch (error) {
+    if (error instanceof HttpError) {
+      reply.code(error.statusCode);
+      return { error: error.message };
+    }
+    throw error;
   }
 
-  if (format === 'svg' && magic.kind !== 'svg') {
-    sourceStream.destroy();
-    reply.code(415);
-    return { error: 'SVG output only supported for SVG inputs' };
-  }
-
-  // Rebuild full stream (head + rest of file)
-  const bodyStream = new PassThrough();
-  bodyStream.write(head);
-  sourceStream.pipe(bodyStream);
-  sourceStream.resume();
-
-  // Prevent hanging streams if client disconnects
   reply.raw.on('close', () => {
-    sourceStream.destroy();
-    bodyStream.destroy();
+    converted.cleanup();
   });
 
-  // SVG passthrough
-  if (format === 'svg') {
-    return reply.type('image/svg+xml').send(bodyStream);
-  }
-
-  // Sharp transformer
-  const transformer = sharp({
-    failOnError: false,
-    sequentialRead: true
-  }).rotate(); // auto-fix EXIF orientation
-  if (keepMetadata) {
-    transformer.withMetadata();
-  }
-
-  applyOutputFormat(transformer, format);
-
-  const outputStream = bodyStream.pipe(transformer);
-
   return reply
-    .type(contentTypeForFormat(format))
+    .type(converted.contentType)
     .header('Content-Disposition', `inline; filename="converted.${format}"`)
-    .send(outputStream);
+    .send(converted.stream);
+});
+
+// Convert + upload to Cloudinary
+app.post('/convert/upload', async (request, reply) => {
+  if (!CLOUDINARY_ENABLED) {
+    reply.code(500);
+    return { error: 'Cloudinary is not configured on this server.' };
+  }
+
+  const format = (request.query?.format || 'avif')
+    .toString()
+    .toLowerCase();
+  const keepMetadata =
+    request.query?.keepMetadata?.toString().toLowerCase() === '1';
+
+  if (!isAllowedFormat(format)) {
+    reply.code(400);
+    return {
+      error:
+        'Unsupported format. Use one of: avif, webp, png, jpeg, jpg, svg.'
+    };
+  }
+
+  const file = await request.file();
+
+  if (!file) {
+    reply.code(400);
+    return { error: 'No file uploaded' };
+  }
+
+  let converted;
+  try {
+    converted = await createConvertedStream({
+      fileStream: file.file,
+      format,
+      keepMetadata
+    });
+  } catch (error) {
+    if (error instanceof HttpError) {
+      reply.code(error.statusCode);
+      return { error: error.message };
+    }
+    throw error;
+  }
+
+  const publicId = buildPublicId(file.filename);
+
+  reply.raw.on('close', () => {
+    converted.cleanup();
+  });
+
+  try {
+    const result = await uploadToCloudinary(converted.stream, {
+      folder: CLOUDINARY_FOLDER,
+      public_id: publicId,
+      resource_type: 'image',
+      overwrite: false
+    });
+
+    return reply.send({
+      url: result.secure_url,
+      bytes: result.bytes,
+      format: result.format,
+      publicId: result.public_id,
+      originalFilename: file.filename || null
+    });
+  } catch (error) {
+    app.log.error(error);
+    reply.code(500);
+    return { error: 'Cloudinary upload failed' };
+  }
 });
 
 /* ------------------------------ ERROR HANDLER ------------------------------ */
@@ -146,6 +202,90 @@ try {
 }
 
 /* -------------------------------- UTILITIES -------------------------------- */
+
+class HttpError extends Error {
+  constructor(statusCode, message) {
+    super(message);
+    this.statusCode = statusCode;
+  }
+}
+
+async function createConvertedStream({ fileStream, format, keepMetadata }) {
+  const sourceStream = fileStream;
+
+  sourceStream.pause();
+  const head = await readHead(sourceStream, 4100);
+  const magic = detectMagic(head);
+
+  if (!magic.valid) {
+    sourceStream.destroy();
+    throw new HttpError(415, 'Unsupported or invalid image signature');
+  }
+
+  if (format === 'svg' && magic.kind !== 'svg') {
+    sourceStream.destroy();
+    throw new HttpError(415, 'SVG output only supported for SVG inputs');
+  }
+
+  const bodyStream = new PassThrough();
+  bodyStream.write(head);
+  sourceStream.pipe(bodyStream);
+  sourceStream.resume();
+
+  const cleanup = () => {
+    sourceStream.destroy();
+    bodyStream.destroy();
+  };
+
+  if (format === 'svg') {
+    return {
+      stream: bodyStream,
+      contentType: 'image/svg+xml',
+      cleanup
+    };
+  }
+
+  const transformer = sharp({
+    failOnError: false,
+    sequentialRead: true
+  }).rotate();
+  if (keepMetadata) {
+    transformer.withMetadata();
+  }
+
+  applyOutputFormat(transformer, format);
+
+  return {
+    stream: bodyStream.pipe(transformer),
+    contentType: contentTypeForFormat(format),
+    cleanup
+  };
+}
+
+function buildPublicId(filename) {
+  const base = (filename || 'image').replace(/\.[^.]+$/, '');
+  const normalized = base
+    .toLowerCase()
+    .replace(/[^a-z0-9-_]+/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/(^-|-$)/g, '');
+  const suffix = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  return `${normalized || 'image'}-${suffix}`;
+}
+
+async function uploadToCloudinary(readable, options) {
+  return new Promise((resolve, reject) => {
+    const uploadStream = cloudinary.uploader.upload_stream(options, (error, result) => {
+      if (error) {
+        reject(error);
+        return;
+      }
+      resolve(result);
+    });
+
+    pipeline(readable, uploadStream).catch(reject);
+  });
+}
 
 async function readHead(stream, size) {
   let total = 0;

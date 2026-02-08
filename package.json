@@ -10,6 +10,7 @@
   "dependencies": {
     "@fastify/cors": "latest",
     "@fastify/multipart": "latest",
+    "cloudinary": "latest",
     "dotenv": "latest",
     "fastify": "latest",
     "sharp": "latest"

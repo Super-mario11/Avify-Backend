@@ -27,6 +27,13 @@ if (CLOUDINARY_ENABLED) {
   });
 }
 
+const normalizeOrigin = (value) => {
+  if (!value || value === '*') return value || '*';
+  return value.replace(/\/$/, '');
+};
+
+const CORS_ORIGIN = normalizeOrigin(process.env.CORS_ORIGIN || '*');
+
 const app = Fastify({
   logger: true,
   bodyLimit: MAX_FILE_SIZE
@@ -40,12 +47,12 @@ await app.register(multipart, {
 });
 
 await app.register(cors, {
-  origin: process.env.CORS_ORIGIN || true,
+  origin: CORS_ORIGIN === '*' ? true : CORS_ORIGIN,
   hook: 'onRequest'
 });
 
 app.addHook('onRequest', async (request, reply) => {
-  reply.header('Access-Control-Allow-Origin', process.env.CORS_ORIGIN || '*');
+  reply.header('Access-Control-Allow-Origin', CORS_ORIGIN);
   reply.header('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
   reply.header('Access-Control-Allow-Headers', 'Content-Type, Authorization');
   if (request.method === 'OPTIONS') {

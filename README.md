@@ -1,1 +1,58 @@
-"# Avify-Backend" 
+# AVIFY Backend
+
+Fastify-based image conversion API used by the AVIFY frontend. Designed for Render deployment.
+
+## Features
+- Convert images to AVIF, WebP, PNG, JPEG, or SVG
+- Streaming conversion with Sharp
+- CORS support for frontend deployments
+
+## Requirements
+- Node.js 18+ recommended
+- npm 9+ recommended
+
+## Local Development
+```bash
+npm install
+npm run dev
+```
+
+Server runs on `http://localhost:3000` by default.
+
+## Environment Variables
+Create `.env` or set these in your host:
+```
+PORT=3000
+HOST=0.0.0.0
+MAX_FILE_SIZE=1073741824
+CORS_ORIGIN=http://localhost:4200
+```
+
+## API
+
+### POST `/convert`
+- `multipart/form-data` with a single field named `file`
+- Query params:
+  - `format` — `avif | webp | png | jpeg | jpg | svg`
+  - `keepMetadata` — `1` to preserve metadata (default strips metadata)
+
+Example:
+```bash
+curl -X POST "http://localhost:3000/convert?format=webp" \
+  -F "file=@./image.jpg" \
+  --output converted.webp
+```
+
+## Deployment (Render)
+Use the repo-level `render.yaml` or configure manually:
+- Root directory: `backend/`
+- Build: `npm install`
+- Start: `npm run start`
+- Env vars:
+  - `PORT=10000`
+  - `HOST=0.0.0.0`
+  - `CORS_ORIGIN=https://YOUR_VERCEL_DOMAIN`
+
+## Notes
+- SVG output only supports SVG inputs.
+- Render free tier may sleep; first request can be slow.
